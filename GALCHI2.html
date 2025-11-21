@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>갈치 게임</title>
+  <style>
+    body {
+      margin: 0;
+      background: #111;
+      color: #fff;
+      font-family: "Courier New", monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      image-rendering: pixelated;
+    }
+    h1 {
+      margin: 16px 0 4px;
+      font-size: 22px;
+    }
+    #info {
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    canvas {
+      border: 2px solid #666;
+      background: #203040;
+      image-rendering: pixelated;
+    }
+    #statusBar {
+      width: 800px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      margin-top: 6px;
+    }
+    #progressOuter {
+      flex: 1;
+      height: 8px;
+      background: #333;
+      margin: 0 8px;
+      overflow: hidden;
+    }
+    #progressInner {
+      height: 100%;
+      width: 0%;
+      background: #00ff88;
+      transition: width 0.1s linear;
+    }
+    #distanceText, #lifeText, #stateText {
+      min-width: 90px;
+      text-align: left;
+    }
+  </style>
+</head>
+<body>
+  <h1>갈치 게임</h1>
+  <div id="info">
+    스페이스바 / ↑ : 점프 (공중에서 한 번 더 눌러 2단 점프) &nbsp; | &nbsp; R : 재시작 / 다음 스테이지
+  </div>
+  <canvas id="gameCanvas" width="800" height="400"></canvas>
+
+  <div id="statusBar">
+    <span id="distanceText">DIST: 0 m</span>
+    <span id="lifeText">LIFE: ♥♥♥</span>
+    <div id="progressOuter">
+      <div id="progressInner"></div>
+    </div>
+    <span id="stateText"></span>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+
+    const distanceText = document.getElementById("distanceText");
+    const stateText = document.getElementById("stateText");
+    const progressInner = document.getElementById("progressInner");
+    const lifeText = document.getElementById("lifeText");
+
+    // ===== 공통 설정 =====
+    const GROUND_Y = 320;
+    const GRAVITY = 0.6;
+    const JUMP_POWER = -12;
+    const SPRITE_SIZE = 64;
+    const MAX_LIFE = 5;
+
+    // ===== 스테이지 설정 =====
+    const MAX_STAGE = 3;
+    const STAGE_CONFIGS = {
+      1: {
+        name: "크리스마스 이브 산책",
+        targetDistance: 2000,
+        baseSpeed: 4,
+        obstacleIntervalMin: 50,
+        obstacleIntervalMax: 90,
+        itemIntervalMin: 130,
+        itemIntervalMax: 220,
+        itemProb: { bone: 0.4, sweetpotato: 0.3, poop: 0.3 },
+        skyColors: ["#2b324f", "#3f4565", "#d08b5c"]
+      },
+      2: {
+        name: "늦은 밤 눈길",
+        targetDistance: 2300,
+        baseSpeed: 5,
+        obstacleIntervalMin: 40,
+        obstacleIntervalMax: 80,
+        itemIntervalMin: 110,
+        itemIntervalMax: 200,
+        itemProb: { bone: 0.3, sweetpotato: 0.3, poop: 0.4 },
+        skyColors: ["#181c3b", "#2f3655", "#b8744a"]
+      },
+      3: {
+        name: "새벽 집에 가는 길",
+        targetDistance: 2600,
+        baseSpeed: 6,
+        obstacleIntervalMin: 35,
+        obstacleIntervalMax: 70,
+        itemIntervalMin: 100,
+        itemIntervalMax: 190,
+        itemProb: { bone: 0.2, sweetpotato: 0.3, poop: 0.5 },
+        skyColors: ["#121832", "#24304c", "#9d6640"]
+      }
+    };
+
+    let stage = 1;
+    let cfg = STAGE_CONFIGS[stage];
+
+    let gameSpeedMultiplier = 1;
+    let boostTimer = 0;
+
+    // 플레이어
+    const player = {
+      x: 120,
+      y: GROUND_Y - SPRITE_SIZE,
+      width: SPRITE_SIZE,
+      height: SPRITE_SIZE,
+      vy: 0,
+      onGround: true,
+      jumpCount: 0
+    };
+
+    // 스프라이트 이미지들
+    const sprites = {
+      idle: new Image(),
+      run1: new Image(),
+      run2: new Image(),
+      jump: new Image(),
+      hit: new Image()
+    };
+
+    sprites.idle.src = "dog_idle.png";
+    sprites.run1.src = "dog_run1.png";
+    sprites.run2.src = "dog_run2.png";
+    sprites.jump.src = "dog_jump.png";
+    sprites.hit.src = "dog_hit.png";
+
+    let spriteLoadedCount = 0;
+    const spriteTotal = 5;
+    for (const key in sprites) {
+      sprites[key].onload = () => {
+        spriteLoadedCount++;
+      };
+    }
+
+    // 눈
+    const snowflakes = [];
+    for (let i = 0; i < 90; i++) {
+      snowflakes.push({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        speed: 0.6 + Math.random() * 1.8
+      });
+    }
+
+    // 게임 상태
+    let distance = 0;
+    let gameState = "playing"; // playing, gameover, stage_clear, all_clear
+    let life = 3;
+    let hitTimer = 0;
+    let animFrame = 0;
+
+    // 오브젝트
+    let objects = [];
+    let obstacleTimer = 0;
+    let itemTimer = 0;
+
+    function applyStageConfig() {
+      cfg = STAGE_CONFIGS[stage];
+      stateText.textContent = `STAGE ${stage} : ${cfg.name}`;
+    }
+
+    function resetStage() {
+      distance = 0;
+      gameState = "playing";
+      player.y = GROUND_Y - player.height;
+      player.vy = 0;
+      player.onGround = true;
+      player.jumpCount = 0;
+      life = 3;
+      updateLifeText();
+      objects = [];
+      gameSpeedMultiplier = 1;
+      boostTimer = 0;
+      hitTimer = 0;
+      animFrame = 0;
+      obstacleTimer = 0;
+      itemTimer = 0;
+      progressInner.style.width = "0%";
+      applyStageConfig();
+    }
+
+    function updateLifeText() {
+      let hearts = "";
+      for (let i = 0; i < life; i++) hearts += "♥";
+      lifeText.textContent = `LIFE: ${hearts}`;
+    }
+
+    function spawnObstacle() {
+      const width = 26 + Math.random() * 12;
+      const height = 24 + Math.random() * 14;
+      objects.push({
+        type: "obstacle",
+        x: canvas.width + 20,
+        y: GROUND_Y - height,
+        width,
+        height,
+        active: true
+      });
+    }
+
+    function spawnItem() {
+      const r = Math.random();
+      const p = cfg.itemProb;
+      let type;
+      if (r < p.bone) type = "bone";
+      else if (r < p.bone + p.sweetpotato) type = "sweetpotato";
+      else type = "poop";
+
+      const size = 30;
+      const y = GROUND_Y - size - (type === "sweetpotato" ? 40 : 0);
+
+      objects.push({
+        type,
+        x: canvas.width + 20,
+        y,
+        width: size,
+        height: size,
+        active: true
+      });
+    }
+
+    function update() {
+      if (gameState !== "playing") return;
+
+      const currentSpeed = cfg.baseSpeed * gameSpeedMultiplier;
+
+      // 거리
+      distance += currentSpeed * 0.6;
+      if (distance >= cfg.targetDistance) {
+        distance = cfg.targetDistance;
+        if (stage < MAX_STAGE) {
+          gameState = "stage_clear";
+          stateText.textContent = `STAGE ${stage} CLEAR! (R 키로 다음 스테이지)`;
+        } else {
+          gameState = "all_clear";
+          stateText.textContent = "ALL STAGES CLEAR! 🎁 (R 키로 처음부터)";
+        }
+      }
+
+      // 폭주 타이머
+      if (boostTimer > 0) {
+        boostTimer--;
+        if (boostTimer <= 0) {
+          gameSpeedMultiplier = 1;
+        }
+      }
+
+      // 플레이어 물리
+      player.vy += GRAVITY;
+      player.y += player.vy;
+
+      if (player.y + player.height >= GROUND_Y) {
+        player.y = GROUND_Y - player.height;
+        player.vy = 0;
+        player.onGround = true;
+        player.jumpCount = 0;
+      } else {
+        player.onGround = false;
+      }
+
+      if (hitTimer > 0) hitTimer--;
+
+      // 오브젝트 생성
+      obstacleTimer--;
+      if (obstacleTimer <= 0) {
+        spawnObstacle();
+        obstacleTimer = Math.floor(
+          cfg.obstacleIntervalMin +
+          Math.random() * (cfg.obstacleIntervalMax - cfg.obstacleIntervalMin)
+        );
+      }
+
+      itemTimer--;
+      if (itemTimer <= 0) {
+        spawnItem();
+        itemTimer = Math.floor(
+          cfg.itemIntervalMin +
+          Math.random() * (cfg.itemIntervalMax - cfg.itemIntervalMin)
+        );
+      }
+
+      // 오브젝트 이동
+      objects.forEach(obj => {
+        obj.x -= currentSpeed;
+      });
+
+      objects = objects.filter(obj => obj.x + obj.width > -50 && obj.active);
+
+      // 충돌
+      for (const obj of objects) {
+        if (!obj.active) continue;
+
+        const hit =
+          player.x < obj.x + obj.width &&
+          player.x + player.width > obj.x &&
+          player.y < obj.y + obj.height &&
+          player.y + player.height > obj.y;
+
+        if (!hit) continue;
+
+        if (obj.type === "obstacle") {
+          gameState = "gameover";
+          stateText.textContent = `GAME OVER (STAGE ${stage}) 💀  - R 키로 다시 시작`;
+          break;
+        } else if (obj.type === "bone") {
+          if (life < MAX_LIFE) {
+            life++;
+            updateLifeText();
+          }
+          obj.active = false;
+        } else if (obj.type === "sweetpotato") {
+          gameSpeedMultiplier = 1.8;
+          boostTimer = 60 * 3;
+          obj.active = false;
+        } else if (obj.type === "poop") {
+          life--;
+          hitTimer = 20;
+          updateLifeText();
+          obj.active = false;
+          if (life <= 0) {
+            gameState = "gameover";
+            stateText.textContent = `GAME OVER (STAGE ${stage}) 💩  - R 키로 다시 시작`;
+            break;
+          }
+        }
+      }
+
+      // UI
+      distanceText.textContent = `STAGE ${stage} | DIST: ${Math.floor(distance)} m`;
+      const progressPercent = (distance / cfg.targetDistance) * 100;
+      progressInner.style.width = `${progressPercent}%`;
+
+      animFrame++;
+    }
+
+    // ===== 배경 =====
+    function drawBackground() {
+      const [cTop, cMid, cBottom] = cfg.skyColors;
+      const grd = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      grd.addColorStop(0, cTop);
+      grd.addColorStop(0.4, cMid);
+      grd.addColorStop(1, cBottom);
+      ctx.fillStyle = grd;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // 눈송이
+      ctx.fillStyle = "#ffffff";
+      snowflakes.forEach(s => {
+        ctx.fillRect(Math.floor(s.x), Math.floor(s.y), 2, 2);
+        s.y += s.speed * (stage === 3 ? 1.3 : stage === 2 ? 1.1 : 1);
+        if (s.y > canvas.height) {
+          s.y = -5;
+          s.x = Math.random() * canvas.width;
+        }
+      });
+
+      // 뒷배경 건물 실루엣
+      ctx.fillStyle = "#273047";
+      for (let x = 0; x < canvas.width; x += 80) {
+        const bh = 80 + Math.random() * 60;
+        ctx.fillRect(x, GROUND_Y - bh - 40, 70, bh);
+      }
+
+      // 크리스마스 거리(집/가게)
+      const baseY = GROUND_Y - 40;
+      for (let i = 0; i < 4; i++) {
+        const houseX = 40 + i * 190;
+        const houseW = 120;
+        const houseH = 60;
+
+        // 건물 본체
+        ctx.fillStyle = "#5b3b36";
+        ctx.fillRect(houseX, baseY - houseH, houseW, houseH);
+
+        // 지붕
+        ctx.fillStyle = "#42272a";
+        ctx.fillRect(houseX - 4, baseY - houseH - 14, houseW + 8, 14);
+
+        // 창문 (밤이 깊을수록 더 밝게)
+        for (let w = 0; w < 3; w++) {
+          const wx = houseX + 10 + w * 35;
+          const wy = baseY - houseH + 12;
+          const baseColor = (w % 2 === 0) ? "#ffdd88" : "#ffeebb";
+          ctx.fillStyle =
+            stage === 1 ? baseColor :
+            stage === 2 ? "#ffe8aa" :
+            "#fff3c5";
+          ctx.fillRect(wx, wy, 18, 18);
+        }
+
+        // 문
+        ctx.fillStyle = "#2b1815";
+        ctx.fillRect(houseX + houseW - 28, baseY - 26, 18, 26);
+
+        // 전구 라인
+        for (let g = 0; g < houseW; g += 12) {
+          const gx = houseX + g + 4;
+          const gy = baseY - houseH - 4;
+          const colors = ["#ff6666", "#ffdd55", "#88e0ff", "#a4ff88"];
+          let c = colors[g % 4];
+          if (stage === 3) {
+            c = colors[(g + 1) % 4];
+          }
+          ctx.fillStyle = c;
+          ctx.fillRect(gx, gy, 3, 3);
+        }
+      }
+
+      // 가로등
+      for (let i = 0; i < 3; i++) {
+        const lx = 110 + i * 230;
+        ctx.fillStyle = "#2c2c3a";
+        ctx.fillRect(lx, GROUND_Y - 70, 4, 70);
+        ctx.fillRect(lx - 6, GROUND_Y - 72, 16, 6);
+        ctx.fillStyle = stage === 1 ? "#ffe9a3" :
+                        stage === 2 ? "#ffe9b8" : "#fff3cc";
+        ctx.fillRect(lx - 4, GROUND_Y - 66, 12, 16);
+      }
+
+      // 중앙 크리스마스 트리
+      const tX = canvas.width - 90;
+      const tBase = GROUND_Y - 10;
+      ctx.fillStyle = "#3b2513";
+      ctx.fillRect(tX + 10, tBase - 20, 10, 20);
+      ctx.fillStyle = "#0f7b3a";
+      ctx.fillRect(tX - 10, tBase - 40, 40, 18);
+      ctx.fillRect(tX - 4, tBase - 60, 28, 18);
+      ctx.fillRect(tX + 2, tBase - 80, 16, 18);
+
+      // 트리 전구
+      ctx.fillStyle = "#ff6666";
+      ctx.fillRect(tX + 4, tBase - 44, 3, 3);
+      ctx.fillStyle = "#ffdd55";
+      ctx.fillRect(tX + 16, tBase - 56, 3, 3);
+      ctx.fillStyle = "#88e0ff";
+      ctx.fillRect(tX + 8, tBase - 70, 3, 3);
+    }
+
+    function drawGround() {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, GROUND_Y, canvas.width, canvas.height - GROUND_Y);
+      ctx.strokeStyle = "#d0d0d0";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, GROUND_Y);
+      ctx.lineTo(canvas.width, GROUND_Y);
+      ctx.stroke();
+    }
+
+    function drawPlayer() {
+      let imgToDraw = null;
+
+      if (hitTimer > 0) {
+        imgToDraw = sprites.hit;
+      } else if (!player.onGround) {
+        imgToDraw = sprites.jump;
+      } else {
+        const seq = Math.floor(animFrame / 8) % 2;
+        imgToDraw = seq === 0 ? sprites.run1 : sprites.run2;
+      }
+
+      const x = Math.floor(player.x);
+      const y = Math.floor(player.y);
+
+      if (spriteLoadedCount === spriteTotal && imgToDraw) {
+        ctx.drawImage(imgToDraw, x, y, player.width, player.height);
+      } else {
+        ctx.fillStyle = "#ffdd55";
+        ctx.fillRect(x, y, player.width, player.height);
+      }
+    }
+
+    // ===== 아이템/장애물 그리기 =====
+    function drawObjects() {
+      objects.forEach(obj => {
+        if (!obj.active) return;
+
+        const x = Math.floor(obj.x);
+        const y = Math.floor(obj.y);
+        const w = obj.width;
+        const h = obj.height;
+
+        // 장애물: 픽셀 바위
+        if (obj.type === "obstacle") {
+          ctx.save();
+          const bx = x;
+          const by = y;
+          const s = Math.max(4, Math.floor(Math.min(w, h) / 4));
+
+          ctx.fillStyle = "#6f5b4a";
+
+          // 아래 발 부분
+          ctx.fillRect(bx + s,     by + 3 * s, 2 * s, 1 * s);
+          ctx.fillRect(bx + 2 * s, by + 2.5 * s, 2 * s, 1.5 * s);
+
+          // 중간 몸통
+          ctx.fillRect(bx + 1 * s, by + 2 * s, 3 * s, 1 * s);
+          ctx.fillRect(bx + 1.5*s, by + 1 * s, 2 * s, 1 * s);
+
+          // 윗부분
+          ctx.fillRect(bx + 2 * s, by + 0 * s, 1 * s, 1 * s);
+
+          // 하이라이트
+          ctx.fillStyle = "#9b7f63";
+          ctx.fillRect(bx + 2 * s, by + 1 * s, 1 * s, 1 * s);
+          ctx.fillRect(bx + 1.5*s, by + 2 * s, 1 * s, 1 * s);
+
+          ctx.restore();
+        }
+
+        // 뼈다귀
+        else if (obj.type === "bone") {
+          ctx.save();
+          ctx.translate(x + w / 2, y + h / 2);
+
+          const lw = w * 0.6;
+          const lh = h * 0.25;
+          const r  = h * 0.22;
+
+          ctx.fillStyle = "#ffffff";
+          ctx.beginPath();
+          ctx.rect(-lw / 2, -lh / 2, lw, lh);
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.arc(-lw / 2, -lh / 2, r, 0, Math.PI * 2);
+          ctx.arc(-lw / 2,  lh / 2, r, 0, Math.PI * 2);
+          ctx.arc( lw / 2, -lh / 2, r, 0, Math.PI * 2);
+          ctx.arc( lw / 2,  lh / 2, r, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = "rgba(0,0,0,0.15)";
+          ctx.beginPath();
+          ctx.ellipse(0, lh / 2 + r * 0.6, lw * 0.7, r * 0.5, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.restore();
+        }
+
+        // 고구마
+        else if (obj.type === "sweetpotato") {
+          ctx.save();
+          ctx.translate(x + w / 2, y + h / 2);
+          ctx.rotate(-0.2);
+
+          ctx.fillStyle = "#c87ad8";
+          ctx.beginPath();
+          ctx.ellipse(0, 0, w * 0.5, h * 0.35, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = "#f1d48a";
+          ctx.beginPath();
+          ctx.ellipse(-w * 0.1, -h * 0.1, w * 0.2, h * 0.12, -0.3, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.strokeStyle = "rgba(60,0,60,0.4)";
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+
+          ctx.restore();
+        }
+
+        // 똥
+        else if (obj.type === "poop") {
+          ctx.save();
+          ctx.translate(x + w / 2, y + h * 0.9);
+
+          ctx.fillStyle = "#7b4a1f";
+
+          // 아래층
+          ctx.beginPath();
+          ctx.moveTo(-w * 0.35, 0);
+          ctx.lineTo(w * 0.35, 0);
+          ctx.lineTo(w * 0.25, -h * 0.25);
+          ctx.lineTo(-w * 0.25, -h * 0.25);
+          ctx.closePath();
+          ctx.fill();
+
+          // 중간층
+          ctx.beginPath();
+          ctx.moveTo(-w * 0.22, -h * 0.25);
+          ctx.lineTo(w * 0.22, -h * 0.25);
+          ctx.lineTo(w * 0.15, -h * 0.47);
+          ctx.lineTo(-w * 0.15, -h * 0.47);
+          ctx.closePath();
+          ctx.fill();
+
+          // 위층
+          ctx.beginPath();
+          ctx.moveTo(-w * 0.1, -h * 0.47);
+          ctx.lineTo(w * 0.1, -h * 0.47);
+          ctx.lineTo(0,       -h * 0.7);
+          ctx.closePath();
+          ctx.fill();
+
+          // 하이라이트
+          ctx.fillStyle = "#b07135";
+          ctx.beginPath();
+          ctx.moveTo(-w * 0.08, -h * 0.3);
+          ctx.lineTo(0,         -h * 0.35);
+          ctx.lineTo(-w * 0.02, -h * 0.4);
+          ctx.closePath();
+          ctx.fill();
+
+          ctx.restore();
+        }
+      });
+    }
+
+    function drawOverlay() {
+      if (boostTimer > 0 && gameState === "playing") {
+        ctx.fillStyle = "rgba(255, 120, 80, 0.15)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      if (gameState === "gameover") {
+        ctx.fillStyle = "rgba(0,0,0,0.6)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#ffaaaa";
+        ctx.textAlign = "center";
+        ctx.font = "24px 'Courier New'";
+        ctx.fillText(`GAME OVER (STAGE ${stage})`, canvas.width / 2, canvas.height / 2 - 10);
+        ctx.font = "14px 'Courier New'";
+        ctx.fillText("R 키를 눌러 다시 시작", canvas.width / 2, canvas.height / 2 + 16);
+      }
+
+      if (gameState === "stage_clear") {
+        ctx.fillStyle = "rgba(0,0,0,0.5)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#aaffaa";
+        ctx.textAlign = "center";
+        ctx.font = "24px 'Courier New'";
+        ctx.fillText(`STAGE ${stage} CLEAR!`, canvas.width / 2, canvas.height / 2 - 10);
+        ctx.font = "14px 'Courier New'";
+        ctx.fillText("R 키를 눌러 다음 스테이지", canvas.width / 2, canvas.height / 2 + 16);
+      }
+
+      if (gameState === "all_clear") {
+        ctx.fillStyle = "rgba(0,0,0,0.5)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#aaffff";
+        ctx.textAlign = "center";
+        ctx.font = "24px 'Courier New'";
+        ctx.fillText("ALL STAGES CLEAR! 🎁", canvas.width / 2, canvas.height / 2 - 10);
+        ctx.font = "14px 'Courier New'";
+        ctx.fillText("R 키를 눌러 처음부터", canvas.width / 2, canvas.height / 2 + 16);
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawBackground();
+      drawGround();
+      drawObjects();
+      drawPlayer();
+      drawOverlay();
+    }
+
+    function gameLoop() {
+      update();
+      draw();
+      requestAnimationFrame(gameLoop);
+    }
+
+    function handleJump() {
+      if (gameState !== "playing") return;
+      if (player.jumpCount < 2) {
+        player.vy = JUMP_POWER;
+        player.jumpCount++;
+        player.onGround = false;
+      }
+    }
+
+    window.addEventListener("keydown", e => {
+      if (e.code === "Space" || e.code === "ArrowUp") {
+        e.preventDefault();
+        handleJump();
+      }
+      if (e.code === "KeyR") {
+        if (gameState === "stage_clear") {
+          // 다음 스테이지
+          stage++;
+          if (stage > MAX_STAGE) stage = MAX_STAGE;
+          resetStage();
+        } else if (gameState === "all_clear" || gameState === "gameover") {
+          // 처음부터
+          stage = 1;
+          resetStage();
+        } else {
+          // 진행 중이면 현재 스테이지 리셋
+          resetStage();
+        }
+      }
+    });
+
+    // 시작
+    applyStageConfig();
+    resetStage();
+    gameLoop();
+  </script>
+</body>
+</html>
